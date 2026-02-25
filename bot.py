@@ -21,6 +21,7 @@ load_dotenv()
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 ADMIN_ID: int = int(os.getenv("ADMIN_ID", "0"))
 DB_PATH: str = os.getenv("DB_PATH", "complaints.db")
+LOG_CHAT_ID: int = int(os.getenv("LOG_CHAT_ID", "0"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -664,6 +665,8 @@ async def accept_complaint(callback: CallbackQuery) -> None:
     await invalidate_complaint_messages(callback.bot, complaint_id)
     actor = callback.from_user.username or str(callback.from_user.id)
     await callback.message.reply(f"✅ Жалоба #{complaint_id} принята (@{actor}). Пользователь уведомлён.")
+    await log_complaint_to_group(callback.bot, complaint_id, "принята",
+                                  callback.from_user.id, callback.from_user.username)
     await callback.answer()
 
 
@@ -775,6 +778,92 @@ async def reject_reason(message: Message, state: FSMContext) -> None:
     await invalidate_complaint_messages(message.bot, complaint_id)
     actor = message.from_user.username or str(message.from_user.id)
     await message.answer(f"❌ Жалоба #{complaint_id} отклонена (@{actor}). Пользователь уведомлён.")
+    await log_complaint_to_group(message.bot, complaint_id, "отклонена",
+                                  message.from_user.id, message.from_user.username,
+                                  reason=message.text)
+
+
+# ---------------------------------------------------------------------------
+# Group logging
+# ---------------------------------------------------------------------------
+
+async def log_complaint_to_group(
+    bot: Bot,
+    complaint_id: int,
+    action: str,          # "принята" | "отклонена"
+    actor_id: int,
+    actor_username: str | None,
+    reason: str | None = None,
+) -> None:
+    if not LOG_CHAT_ID:
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT user_id, username, fio, officer_info, violation, media_file_id, media_type"
+            " FROM complaints WHERE id=?", (complaint_id,)
+        ) as cur:
+            c = await cur.fetchone()
+        async with db.execute(
+            "SELECT fio, position, rank, nickname FROM employees WHERE user_id=?", (actor_id,)
+        ) as cur:
+            emp = await cur.fetchone()
+
+    if not c:
+        return
+
+    user_id, username, fio, officer_info, violation, media_file_id, media_type = c
+    uname = f"@{username}" if username else f"ID: {user_id}"
+    actor_uname = f"@{actor_username}" if actor_username else f"ID: {actor_id}"
+    action_emoji = "✅" if action == "принята" else "❌"
+
+    # Message 1: complaint card
+    complaint_text = (
+        f"{action_emoji} <b>Жалоба №{complaint_id} {action}</b> ({actor_uname})\n\n"
+        f"👤 <b>От:</b> {uname}\n"
+        f"📋 <b>ФИО заявителя:</b> {fio}\n"
+        f"👮 <b>Сотрудник / жетон:</b> {officer_info}\n"
+        f"⚠️ <b>Нарушение:</b> {violation}"
+    )
+    if reason:
+        complaint_text += f"\n📝 <b>Причина отказа:</b> {reason}"
+
+    try:
+        if media_file_id:
+            send_fn = {
+                "photo": bot.send_photo,
+                "video": bot.send_video,
+                "document": bot.send_document,
+            }.get(media_type, bot.send_document)
+            await send_fn(LOG_CHAT_ID, media_file_id, caption=complaint_text, parse_mode="HTML")
+        else:
+            await bot.send_message(LOG_CHAT_ID, complaint_text, parse_mode="HTML")
+    except Exception as e:
+        logger.warning("Could not send complaint card to log group: %s", e)
+        return
+
+    # Message 2: staff card
+    if emp:
+        emp_fio, emp_position, emp_rank, emp_nickname = emp
+        staff_text = (
+            f"👮 <b>Карточка сотрудника</b>\n\n"
+            f"📛 Никнейм: {emp_nickname or '—'}\n"
+            f"📋 ФИО: {emp_fio or '—'}\n"
+            f"🏷 Должность: {emp_position or '—'}\n"
+            f"⭐ Звание: {emp_rank or '—'}\n"
+            f"🔗 Telegram: {actor_uname}"
+        )
+    else:
+        staff_text = (
+            f"👮 <b>Карточка сотрудника</b>\n\n"
+            f"🔗 Telegram: {actor_uname}\n"
+            f"🆔 ID: <code>{actor_id}</code>\n"
+            f"(Администратор)"
+        )
+    try:
+        await bot.send_message(LOG_CHAT_ID, staff_text, parse_mode="HTML")
+    except Exception as e:
+        logger.warning("Could not send staff card to log group: %s", e)
 
 
 # ---------------------------------------------------------------------------
