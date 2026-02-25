@@ -813,17 +813,16 @@ async def log_complaint_to_group(
         return
 
     user_id, username, fio, officer_info, violation, media_file_id, media_type = c
-    uname = f"@{username}" if username else f"ID: {user_id}"
-    actor_uname = f"@{actor_username}" if actor_username else f"ID: {actor_id}"
-    action_emoji = "✅" if action == "принята" else "❌"
 
-    # Message 1: complaint card
+    # Message 1: media (if any) + complaint card as separate messages — same as employees receive
+    action_emoji = "✅" if action == "принята" else "❌"
+    actor_uname = f"@{actor_username}" if actor_username else f"ID: {actor_id}"
+    uname = f"@{username}" if username else f"ID: {user_id}"
+
+    header = f"{action_emoji} <b>Жалоба №{complaint_id} {action}</b> ({actor_uname})\n\n"
     complaint_text = (
-        f"{action_emoji} <b>Жалоба №{complaint_id} {action}</b> ({actor_uname})\n\n"
-        f"👤 <b>От:</b> {uname}\n"
-        f"📋 <b>ФИО заявителя:</b> {fio}\n"
-        f"👮 <b>Сотрудник / жетон:</b> {officer_info}\n"
-        f"⚠️ <b>Нарушение:</b> {violation}"
+        header
+        + build_complaint_text(complaint_id, uname, user_id, fio, officer_info, violation).split("\n\n", 1)[1]
     )
     if reason:
         complaint_text += f"\n📝 <b>Причина отказа:</b> {reason}"
@@ -835,9 +834,8 @@ async def log_complaint_to_group(
                 "video": bot.send_video,
                 "document": bot.send_document,
             }.get(media_type, bot.send_document)
-            await send_fn(LOG_CHAT_ID, media_file_id, caption=complaint_text, parse_mode="HTML")
-        else:
-            await bot.send_message(LOG_CHAT_ID, complaint_text, parse_mode="HTML")
+            await send_fn(LOG_CHAT_ID, media_file_id)
+        await bot.send_message(LOG_CHAT_ID, complaint_text, parse_mode="HTML")
     except Exception as e:
         logger.warning("Could not send complaint card to log group: %s", e)
         return
