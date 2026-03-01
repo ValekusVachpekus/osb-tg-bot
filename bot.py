@@ -170,7 +170,7 @@ async def send_complaint_to_all(bot: Bot, complaint_id: int, text: str,
     msg_rows = []
     for rid in recipients:
         try:
-            if media_file_id:
+            if media_file_id and media_type != "link":
                 send_fn = {
                     "photo": bot.send_photo,
                     "video": bot.send_video,
@@ -178,7 +178,8 @@ async def send_complaint_to_all(bot: Bot, complaint_id: int, text: str,
                 }.get(media_type, bot.send_document)
                 sent = await send_fn(rid, media_file_id, caption=text, parse_mode="HTML", reply_markup=keyboard)
             else:
-                sent = await bot.send_message(rid, text, parse_mode="HTML", reply_markup=keyboard)
+                full_text = text + (f"\n🔗 <b>Доказательство:</b> {media_file_id}" if media_type == "link" else "")
+                sent = await bot.send_message(rid, full_text, parse_mode="HTML", reply_markup=keyboard)
             msg_rows.append((complaint_id, rid, sent.message_id))
         except Exception as e:
             logger.warning("Could not send complaint to %s: %s", rid, e)
@@ -531,8 +532,9 @@ async def process_violation(message: Message, state: FSMContext) -> None:
     await state.update_data(violation=message.text)
     await state.set_state(ComplaintForm.media)
     await message.answer(
-        "Шаг 4/4: Прикрепите фото или видео в качестве доказательства\n"
-        "((Разрешение минимум 720p, должно быть видно Ваш никнейм и никнейм сотрудника, дату и время.))\n"
+        "Шаг 4/4: Прикрепите доказательство:\n"
+        "• фото или видео (разрешение минимум 720p, должно быть видно Ваш никнейм и никнейм сотрудника, дату и время)\n"
+        "• или отправьте ссылку на доказательство\n"
         "(или /skip чтобы пропустить):"
     )
 
@@ -540,6 +542,19 @@ async def process_violation(message: Message, state: FSMContext) -> None:
 @router.message(ComplaintForm.media, Command("skip"))
 async def skip_media(message: Message, state: FSMContext) -> None:
     await _submit_complaint(message, state, None, None)
+
+
+@router.message(ComplaintForm.media, F.text)
+async def process_media_link(message: Message, state: FSMContext) -> None:
+    if await is_blocked(message.from_user.id):
+        await state.clear()
+        await message.answer("❌ Вы заблокированы.")
+        return
+    text = message.text.strip()
+    if not (text.startswith("http://") or text.startswith("https://")):
+        await message.answer("❌ Это не ссылка. Отправьте фото, видео или ссылку (начинающуюся с http:// или https://), либо /skip чтобы пропустить.")
+        return
+    await _submit_complaint(message, state, text, "link")
 
 
 @router.message(ComplaintForm.media, F.photo | F.video | F.document)
@@ -826,9 +841,11 @@ async def log_complaint_to_group(
     )
     if reason:
         complaint_text += f"\n📝 <b>Причина отказа:</b> {reason}"
+    if media_type == "link" and media_file_id:
+        complaint_text += f"\n🔗 <b>Доказательство:</b> {media_file_id}"
 
     try:
-        if media_file_id:
+        if media_file_id and media_type != "link":
             send_fn = {
                 "photo": bot.send_photo,
                 "video": bot.send_video,
